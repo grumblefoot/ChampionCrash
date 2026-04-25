@@ -7,6 +7,19 @@ enum class GameState {
     STOPPED     // The character has come to a halt
 }
 
+enum class BoostType {
+    ROCKET,
+    BARREL,
+    STOP_SIGN
+}
+
+data class BoostItem(
+    val x: Float,
+    val y: Float,
+    val type: BoostType,
+    val active: Boolean = true
+)
+
 data class GameData(
     val x: Float = 0f,
     val y: Float = 0f,
@@ -14,5 +27,7 @@ data class GameData(
     val velocityY: Float = 0f,
     val gameState: GameState = GameState.IDLE,
     val chargePower: Float = 0f,
-    val chargeIncreasing: Boolean = true
+    val chargeIncreasing: Boolean = true,
+    val boosts: List<BoostItem> = emptyList(),
+    val lastGeneratedBoostX: Float = 500f
 )

@@ -10,8 +10,15 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -28,8 +35,10 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
@@ -41,15 +50,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material3.Button
 import androidx.wear.compose.material3.Text
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import com.example.championcrash.R
+import com.example.championcrash.domain.models.BoostItem
+import com.example.championcrash.domain.models.BoostType
 import com.example.championcrash.domain.models.DevOptions
 import com.example.championcrash.domain.models.GameData
 import com.example.championcrash.domain.models.GameState
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.sin
+import kotlin.random.Random
 
 @Composable
 fun GameScreen(
@@ -65,9 +77,13 @@ fun GameScreen(
 
     val androidVector = ImageVector.vectorResource(id = R.drawable.ic_launcher_foreground)
     val androidPainter = rememberVectorPainter(image = androidVector)
+    val rocketPainter = rememberVectorPainter(image = Icons.Filled.Send)
+    val barrelPainter = rememberVectorPainter(image = Icons.Filled.Warning)
+    val stopPainter = rememberVectorPainter(image = Icons.Filled.Block)
 
     val sensorManager = remember { context.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
     var currentTiltAngle by remember { mutableFloatStateOf((PI / 4).toFloat()) }
+    var isPaused by remember { mutableStateOf(false) }
 
     DisposableEffect(devOptions) {
         val listener = object : SensorEventListener {
@@ -99,7 +115,8 @@ fun GameScreen(
             val deltaSeconds = (currentFrameTime - lastFrameTime) / 1_000_000_000f
             lastFrameTime = currentFrameTime
 
-            gameData = when (gameData.gameState) {
+            if (!isPaused) {
+                gameData = when (gameData.gameState) {
                 GameState.CHARGING -> {
                     val chargeSpeed = 200f * deltaSeconds
                     var newCharge = gameData.chargePower + if (gameData.chargeIncreasing) chargeSpeed else -chargeSpeed
@@ -144,12 +161,68 @@ fun GameScreen(
                             newVelocityX = 0f
                         }
                     }
+
+                    // Boost Generation
+                    var currentBoosts = gameData.boosts.toMutableList()
+                    var lastGenX = gameData.lastGeneratedBoostX
+
+                    while (lastGenX < newX + 1500f) {
+                        val rand = Random.nextFloat()
+                        val type = when {
+                            rand < 0.15f -> BoostType.STOP_SIGN
+                            rand < 0.55f -> BoostType.ROCKET
+                            else -> BoostType.BARREL
+                        }
+                        val bx = lastGenX + 200f + Random.nextFloat() * 400f
+                        val by = if (type == BoostType.ROCKET) 100f + Random.nextFloat() * 300f else 0f
+                        currentBoosts.add(BoostItem(bx, by, type))
+                        lastGenX = bx
+                    }
+
+                    // Collision Detection
+                    currentBoosts = currentBoosts.map { boost ->
+                        if (boost.active) {
+                            // Virtual centers (character icon is ~40dp, boost icon is ~30dp)
+                            val charCenterX = newX + 20f
+                            val charCenterY = newY + 20f
+                            val boostCenterX = boost.x + 15f
+                            val boostCenterY = boost.y + 15f
+                            val dist = hypot(charCenterX - boostCenterX, charCenterY - boostCenterY)
+                            
+                            if (dist < 40f) { // Collision radius
+                                if (boost.type == BoostType.STOP_SIGN) {
+                                    newVelocityX = 0f
+                                    newVelocityY = 0f
+                                    newState = GameState.STOPPED
+                                } else if (boost.type == BoostType.ROCKET) {
+                                    newVelocityX += 400f // Big speed boost
+                                    newVelocityY = maxOf(newVelocityY + 300f, 400f) // Shoot upwards
+                                    newState = GameState.FLYING // Re-launch if was rolling/stopped
+                                } else {
+                                    newVelocityX += 200f // Small speed boost
+                                    newVelocityY = maxOf(newVelocityY + 150f, 250f) // Small bounce
+                                    newState = GameState.FLYING
+                                }
+                                boost.copy(active = false)
+                            } else {
+                                boost
+                            }
+                        } else {
+                            boost
+                        }
+                    }.toMutableList()
+
+                    // Cleanup passed boosts
+                    currentBoosts.removeAll { it.x < newX - 1000f }
                     
                     if (newState == GameState.STOPPED) {
                         val finalDistance = newX.toInt()
                         if (finalDistance > maxDistance) {
                             maxDistance = finalDistance
-                            prefs.edit().putInt("max_distance", maxDistance).apply()
+                            with(prefs.edit()) {
+                                putInt("max_distance", maxDistance)
+                                apply()
+                            }
                         }
                     }
 
@@ -158,10 +231,13 @@ fun GameScreen(
                         y = newY,
                         velocityX = newVelocityX,
                         velocityY = newVelocityY,
-                        gameState = newState
+                        gameState = newState,
+                        boosts = currentBoosts,
+                        lastGeneratedBoostX = lastGenX
                     )
                 }
                 else -> gameData
+                }
             }
         }
     }
@@ -173,12 +249,12 @@ fun GameScreen(
                 awaitEachGesture {
                     awaitFirstDown()
                     
-                    if (gameData.gameState == GameState.IDLE) {
+                    if (gameData.gameState == GameState.IDLE && !isPaused) {
                         gameData = gameData.copy(gameState = GameState.CHARGING, chargePower = 0f)
                     }
                     
                     val up = waitForUpOrCancellation()
-                    if (up != null && gameData.gameState == GameState.CHARGING) {
+                    if (up != null && gameData.gameState == GameState.CHARGING && !isPaused) {
                         val launchPower = gameData.chargePower
                         val maxVelocity = 600f
                         val velocity = (launchPower / 100f) * maxVelocity
@@ -225,6 +301,25 @@ fun GameScreen(
                 )
             }
 
+            // Draw Boosts
+            gameData.boosts.forEach { boost ->
+                if (boost.active) {
+                    val boostSize = 30.dp.toPx()
+                    val screenBX = boost.x - cameraX + startOffsetX
+                    val screenBY = groundY - boostSize - boost.y
+                    
+                    translate(left = screenBX, top = screenBY) {
+                        if (boost.type == BoostType.ROCKET) {
+                            with(rocketPainter) { draw(Size(boostSize, boostSize), colorFilter = ColorFilter.tint(Color.Cyan)) }
+                        } else if (boost.type == BoostType.STOP_SIGN) {
+                            with(stopPainter) { draw(Size(boostSize, boostSize), colorFilter = ColorFilter.tint(Color.Red)) }
+                        } else {
+                            with(barrelPainter) { draw(Size(boostSize, boostSize), colorFilter = ColorFilter.tint(Color(0xFFFFA500))) } // Orange
+                        }
+                    }
+                }
+            }
+
             val iconSize = 40.dp.toPx()
             val screenX = gameData.x - cameraX + startOffsetX
             val screenY = groundY - iconSize - gameData.y
@@ -238,9 +333,7 @@ fun GameScreen(
                 }
             }
             
-            // Aiming Arrow is visible in IDLE and CHARGING states
             if (gameData.gameState == GameState.IDLE || gameData.gameState == GameState.CHARGING) {
-                // If IDLE, just show a fixed minimum arrow length. If CHARGING, animate the length.
                 val baseArrowLength = 20.dp.toPx()
                 val chargeExtension = if (gameData.gameState == GameState.CHARGING) (gameData.chargePower / 100f) * 60.dp.toPx() else 0f
                 val arrowLength = baseArrowLength + chargeExtension
@@ -340,10 +433,51 @@ fun GameScreen(
             }
         }
         
-        if (gameData.gameState == GameState.STOPPED) {
+        if (!isPaused && gameData.gameState != GameState.STOPPED) {
+            Button(
+                onClick = { isPaused = true },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 8.dp)
+            ) {
+                Text("Pause", fontSize = 10.sp)
+            }
+        }
+        
+        if (isPaused) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.8f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(onClick = { isPaused = false }) { Text("Resume", fontSize = 12.sp) }
+                    Button(onClick = { 
+                        isPaused = false
+                        gameData = gameData.copy(gameState = GameState.STOPPED, velocityX = 0f, velocityY = 0f)
+                    }) { Text("End Game", fontSize = 12.sp) }
+                    Button(onClick = onBackToMenu) { Text("Menu", fontSize = 12.sp) }
+                }
+            }
+        }
+
+        if (gameData.gameState == GameState.STOPPED && !isPaused) {
             Button(
                 onClick = {
-                    gameData = GameData() // Reset
+                    gameData = gameData.copy(
+                        x = 0f,
+                        y = 0f,
+                        velocityX = 0f,
+                        velocityY = 0f,
+                        gameState = GameState.IDLE,
+                        chargePower = 0f,
+                        boosts = emptyList(),
+                        lastGeneratedBoostX = 500f
+                    )
                 },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)

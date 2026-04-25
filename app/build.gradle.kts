@@ -42,6 +42,7 @@ dependencies {
     implementation(libs.activity.compose)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
+    implementation("androidx.compose.material:material-icons-extended") // ADDED for Icons.Filled.Send and Icons.Filled.Warning
     implementation(libs.compose.ui.tooling)
     implementation(libs.core.splashscreen)
     implementation(libs.play.services.wearable)
