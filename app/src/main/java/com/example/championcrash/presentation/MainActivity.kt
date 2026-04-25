@@ -1,5 +1,10 @@
 package com.example.championcrash.presentation
 
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -9,9 +14,13 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -22,7 +31,12 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -30,7 +44,10 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material3.AppScaffold
+import androidx.wear.compose.material3.Button
+import androidx.wear.compose.material3.Text
 import androidx.wear.compose.ui.tooling.preview.WearPreviewDevices
+import com.example.championcrash.R
 import com.example.championcrash.presentation.theme.ChampionCrashTheme
 import kotlin.math.PI
 import kotlin.math.abs
@@ -76,6 +93,42 @@ fun WearApp() {
 fun LaunchGameScreen() {
     var gameData by remember { mutableStateOf(GameData()) }
     val textMeasurer = rememberTextMeasurer()
+    val context = LocalContext.current
+
+    // Persistence for longest distance
+    val prefs = remember { context.getSharedPreferences("GamePrefs", Context.MODE_PRIVATE) }
+    var maxDistance by remember { mutableIntStateOf(prefs.getInt("max_distance", 0)) }
+
+    // Vector painter for the Android Icon
+    val androidVector = ImageVector.vectorResource(id = R.drawable.ic_launcher_foreground)
+    val androidPainter = rememberVectorPainter(image = androidVector)
+
+    // Sensor handling for aiming
+    val sensorManager = remember { context.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
+    var currentTiltAngle by remember { mutableFloatStateOf((PI / 4).toFloat()) }
+
+    DisposableEffect(Unit) {
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                event?.let {
+                    if (it.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+                        // Watch accelerometer: X axis changes as wrist is rolled.
+                        // We map roughly -5.0 to 5.0 onto an angle between 0 and PI/2 (0 to 90 degrees)
+                        val x = it.values[0]
+                        val rawAngle = ((x + 5f) / 10f * (PI / 2)).toFloat()
+                        currentTiltAngle = rawAngle.coerceIn(0f, (PI / 2).toFloat())
+                    }
+                }
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
+        
+        onDispose {
+            sensorManager.unregisterListener(listener)
+        }
+    }
 
     LaunchedEffect(Unit) {
         var lastFrameTime = withFrameNanos { it }
@@ -134,6 +187,15 @@ fun LaunchGameScreen() {
                             newVelocityX = 0f
                         }
                     }
+                    
+                    // Check max distance when stopped
+                    if (newState == GameState.STOPPED) {
+                        val finalDistance = newX.toInt()
+                        if (finalDistance > maxDistance) {
+                            maxDistance = finalDistance
+                            prefs.edit().putInt("max_distance", maxDistance).apply()
+                        }
+                    }
 
                     gameData.copy(
                         x = newX,
@@ -155,24 +217,22 @@ fun LaunchGameScreen() {
                 awaitEachGesture {
                     awaitFirstDown()
                     
-                    if (gameData.gameState == GameState.IDLE || gameData.gameState == GameState.STOPPED) {
-                        // Reset and start charging
+                    // Only allow charge start if we are IDLE (Stopped requires button press now)
+                    if (gameData.gameState == GameState.IDLE) {
                         gameData = GameData(gameState = GameState.CHARGING, chargePower = 0f)
                     }
                     
                     val up = waitForUpOrCancellation()
                     if (up != null && gameData.gameState == GameState.CHARGING) {
-                        // Release and launch
+                        // Release and launch using wrist tilt angle
                         val launchPower = gameData.chargePower
-                        // Calculate velocity based on power (e.g., angle is fixed at 45 degrees)
                         val maxVelocity = 600f
                         val velocity = (launchPower / 100f) * maxVelocity
                         
-                        // Roughly 45 degree launch
                         gameData = gameData.copy(
                             gameState = GameState.FLYING,
-                            velocityX = velocity,
-                            velocityY = velocity
+                            velocityX = velocity * cos(currentTiltAngle),
+                            velocityY = velocity * sin(currentTiltAngle)
                         )
                     }
                 }
@@ -214,28 +274,31 @@ fun LaunchGameScreen() {
                 )
             }
 
-            // Draw Character (Circle)
-            val circleRadius = 15.dp.toPx()
+            // Draw Character (Android Logo)
+            val iconSize = 40.dp.toPx()
             val screenX = gameData.x - cameraX + startOffsetX
-            val screenY = groundY - circleRadius - gameData.y // y goes up
+            val screenY = groundY - iconSize - gameData.y // y goes up
 
-            drawCircle(
-                color = Color.Red,
-                radius = circleRadius,
-                center = Offset(screenX, screenY)
-            )
+            val centerX = screenX + iconSize / 2f
+            val centerY = screenY + iconSize / 2f
+
+            translate(left = screenX, top = screenY) {
+                with(androidPainter) {
+                    draw(Size(iconSize, iconSize))
+                }
+            }
             
-            // Draw Charging Indicator Arrow
+            // Draw Charging Indicator Arrow using tilt angle
             if (gameData.gameState == GameState.CHARGING) {
                 val arrowLength = 20.dp.toPx() + (gameData.chargePower / 100f) * 60.dp.toPx()
-                val angle = PI / 4 // 45 degrees
+                val angle = currentTiltAngle.toDouble()
                 
-                val arrowEndX = screenX + (arrowLength * cos(angle)).toFloat()
-                val arrowEndY = screenY - (arrowLength * sin(angle)).toFloat()
+                val arrowEndX = centerX + (arrowLength * cos(angle)).toFloat()
+                val arrowEndY = centerY - (arrowLength * sin(angle)).toFloat()
                 
                 drawLine(
                     color = Color.Yellow,
-                    start = Offset(screenX, screenY),
+                    start = Offset(centerX, centerY),
                     end = Offset(arrowEndX, arrowEndY),
                     strokeWidth = 4.dp.toPx()
                 )
@@ -292,12 +355,12 @@ fun LaunchGameScreen() {
 
             // Draw Distance Text
             if (gameData.gameState == GameState.FLYING || gameData.gameState == GameState.STOPPED) {
-                val distanceText = "Dist: ${gameData.x.toInt()}m"
+                val distanceText = "Dist: ${gameData.x.toInt()}m\nMax: ${maxDistance}m"
                 val textLayoutResult = textMeasurer.measure(
                     text = distanceText,
                     style = TextStyle(
                         color = Color.White,
-                        fontSize = 16.sp,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
                 )
@@ -314,7 +377,7 @@ fun LaunchGameScreen() {
             // Draw Tap to start message
             if (gameData.gameState == GameState.IDLE) {
                 val textLayoutResult = textMeasurer.measure(
-                    text = "Tap & Hold to Charge",
+                    text = "Tap & Hold to Charge\nTilt Wrist to Aim",
                     style = TextStyle(
                         color = Color.White,
                         fontSize = 14.sp
@@ -327,6 +390,20 @@ fun LaunchGameScreen() {
                         y = canvasHeight * 0.4f
                     )
                 )
+            }
+        }
+        
+        // Reset Button Overlay
+        if (gameData.gameState == GameState.STOPPED) {
+            Button(
+                onClick = {
+                    gameData = GameData() // Resets back to IDLE
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp)
+            ) {
+                Text("Play Again", fontSize = 12.sp)
             }
         }
     }
